@@ -9240,7 +9240,7 @@ bool mysql_alter_table(THD *thd, const LEX_CSTRING *new_db,
   bool varchar= create_info->varchar, table_creation_was_logged= 0;
   bool binlog_as_create_select= 0, log_if_exists= 0;
   uint tables_opened;
-  handlerton *new_db_type, *old_db_type;
+  handlerton *new_db_type, *old_db_type= nullptr;
   ha_rows copied=0, deleted=0;
   LEX_CUSTRING frm= {0,0};
   LEX_CSTRING backup_name;
@@ -10653,7 +10653,7 @@ err_cleanup:
   my_free(const_cast<uchar*>(frm.str));
   ddl_log_complete(&ddl_log_state);
   /* Signal to storage engine that ddl log is commited */
-  if (alter_ctx.inplace_alter_table_committed &&
+  if (alter_ctx.inplace_alter_table_committed && old_db_type &&
       old_db_type->inplace_alter_table_committed)
   {
     (*old_db_type->inplace_alter_table_committed)(old_db_type);
