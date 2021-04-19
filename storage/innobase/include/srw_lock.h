@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2020, MariaDB Corporation.
+Copyright (c) 2020, 2021, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -18,16 +18,11 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #pragma once
 #include "univ.i"
+#include "rw_lock.h"
 
-#if !(defined __linux__ || defined __OpenBSD__)
-# define SRW_LOCK_DUMMY
-#elif 0 // defined SAFE_MUTEX
-# define SRW_LOCK_DUMMY /* Use dummy implementation for debugging purposes */
-#endif
-
-#if defined SRW_LOCK_DUMMY && !(defined _WIN32)
+#ifdef SUX_LOCK_GENERIC
 /** An exclusive-only variant of srw_lock */
-class srw_mutex
+class srw_mutex final
 {
   pthread_mutex_t lock;
 public:
@@ -38,28 +33,72 @@ public:
   bool wr_lock_try() { return !pthread_mutex_trylock(&lock); }
 };
 #else
-# define srw_mutex srw_lock_low
+/** Futex-based mutex */
+class srw_mutex final
+{
+  /** The lock word, containing HOLDER and a count of waiters */
+  std::atomic<uint32_t> lock;
+  /** Identifies that the lock is being held */
+  static constexpr uint32_t HOLDER= 1U << 31;
+
+  /** Wait until the mutex has been acquired */
+  void wait_and_lock();
+  /** Wait for lock!=lk */
+  inline void wait(uint32_t lk);
+  /** Wake up one wait() thread */
+  void wake();
+public:
+  /** @return whether the mutex is being held or waited for */
+  bool is_locked_or_waiting() const
+  { return lock.load(std::memory_order_relaxed) != 0; }
+  /** @return whether the mutex is being held by any thread */
+  bool is_locked() const
+  { return (lock.load(std::memory_order_relaxed) & HOLDER) != 0; }
+
+  void init() { DBUG_ASSERT(!is_locked_or_waiting()); }
+  void destroy() { DBUG_ASSERT(!is_locked_or_waiting()); }
+
+  /** @return whether the mutex was acquired */
+  bool wr_lock_try()
+  {
+    uint32_t lk= 0;
+    return lock.compare_exchange_strong(lk, HOLDER,
+                                        std::memory_order_acquire,
+                                        std::memory_order_relaxed);
+  }
+
+  void wr_lock() { if (!wr_lock_try()) wait_and_lock(); }
+  void wr_unlock()
+  {
+    const uint32_t lk= lock.fetch_and(~HOLDER, std::memory_order_release);
+    if (lk != HOLDER)
+    {
+      DBUG_ASSERT(lk & HOLDER);
+      wake();
+    }
+  }
+};
 #endif
 
-#include "rw_lock.h"
-
 /** Slim shared-update-exclusive lock with no recursion */
-class ssux_lock_low final : private rw_lock
+class ssux_lock_low final
+#ifdef SUX_LOCK_GENERIC
+  : private rw_lock
+#endif
 {
 #ifdef UNIV_PFS_RWLOCK
   friend class ssux_lock;
-# if defined SRW_LOCK_DUMMY || defined _WIN32
+# ifdef SUX_LOCK_GENERIC
+# elif defined _WIN32
 # else
   friend class srw_lock;
 # endif
 #endif
-#ifdef SRW_LOCK_DUMMY
+#ifdef SUX_LOCK_GENERIC
   pthread_mutex_t mutex;
   pthread_cond_t cond_shared;
   pthread_cond_t cond_exclusive;
-#endif
-  /** @return pointer to the lock word */
-  rw_lock *word() { return static_cast<rw_lock*>(this); }
+
   /** Wait for a read lock.
   @param l lock word from a failed read_trylock() */
   void read_lock(uint32_t l);
@@ -75,18 +114,14 @@ class ssux_lock_low final : private rw_lock
   /** Wait for signal
   @param l lock word from a failed acquisition */
   inline void readers_wait(uint32_t l);
-  /** Send signal to one waiter */
-  inline void writer_wake();
-  /** Send signal to all waiters */
-  inline void readers_wake();
+  /** Wake waiters */
+  inline void wake();
 public:
-#ifdef SRW_LOCK_DUMMY
   void init();
   void destroy();
-#else
-  void init() { DBUG_ASSERT(!is_locked_or_waiting()); }
-  void destroy() { DBUG_ASSERT(!is_locked_or_waiting()); }
-#endif
+  /** @return whether any writer is waiting */
+  bool is_waiting() const { return (value() & WRITER_WAITING) != 0; }
+
   bool rd_lock_try() { uint32_t l; return read_trylock(l); }
   bool wr_lock_try() { return write_trylock(); }
   void rd_lock() { uint32_t l; if (!read_trylock(l)) read_lock(l); }
@@ -98,18 +133,135 @@ public:
   void rd_unlock();
   void u_unlock();
   void wr_unlock();
+#else
+  /** mutex for synchronization; held by U or X lock holders */
+  srw_mutex writer;
+  /** S or U holders, and WRITER flag for X holder or waiter */
+  std::atomic<uint32_t> readers;
+  /** indicates an X request; readers=WRITER indicates granted X lock */
+  static constexpr uint32_t WRITER= 1U << 31;
+
+  /** Wait for readers!=lk */
+  inline void wait(uint32_t lk);
+
+  /** Wait for readers!=lk|WRITER */
+  void wr_wait(uint32_t lk);
+  /** Wake up wait() on the last rd_unlock() */
+  void wake();
+  /** Acquire a read lock */
+  void rd_wait();
+public:
+  void init() { DBUG_ASSERT(is_vacant()); }
+  void destroy() { DBUG_ASSERT(is_vacant()); }
   /** @return whether any writer is waiting */
-  bool is_waiting() const { return value() & WRITER_WAITING; }
+  bool is_waiting() const
+  { return (readers.load(std::memory_order_relaxed) & WRITER) != 0; }
+# ifndef DBUG_OFF
+  /** @return whether the lock is being held or waited for */
+  bool is_vacant() const
+  {
+    return !readers.load(std::memory_order_relaxed) &&
+      !writer.is_locked_or_waiting();
+  }
+# endif /* !DBUG_OFF */
+
+  bool rd_lock_try()
+  {
+    uint32_t lk= 0;
+    while (!readers.compare_exchange_weak(lk, lk + 1,
+                                          std::memory_order_acquire,
+                                          std::memory_order_relaxed))
+      if (lk & WRITER)
+        return false;
+    return true;
+  }
+
+  bool u_lock_try()
+  {
+    if (!writer.wr_lock_try())
+      return false;
+    IF_DBUG_ASSERT(uint32_t lk=,)
+    readers.fetch_add(1, std::memory_order_acquire);
+    DBUG_ASSERT(lk < WRITER - 1);
+    return true;
+  }
+
+  bool wr_lock_try()
+  {
+    if (!writer.wr_lock_try())
+      return false;
+    uint32_t lk= 0;
+    if (readers.compare_exchange_strong(lk, WRITER,
+                                        std::memory_order_acquire,
+                                        std::memory_order_relaxed))
+      return true;
+    writer.wr_unlock();
+    return false;
+  }
+
+  void rd_lock() { if (!rd_lock_try()) rd_wait(); }
+  void u_lock()
+  {
+    writer.wr_lock();
+    IF_DBUG_ASSERT(uint32_t lk=,)
+    readers.fetch_add(1, std::memory_order_acquire);
+    DBUG_ASSERT(lk < WRITER - 1);
+  }
+  void wr_lock()
+  {
+    writer.wr_lock();
+    if (uint32_t lk= readers.fetch_or(WRITER, std::memory_order_acquire))
+      wr_wait(lk);
+  }
+
+  void u_wr_upgrade()
+  {
+    DBUG_ASSERT(writer.is_locked());
+    uint32_t lk= 1;
+    if (!readers.compare_exchange_strong(lk, WRITER,
+                                         std::memory_order_acquire,
+                                         std::memory_order_relaxed))
+      wr_wait(lk);
+  }
+  void wr_u_downgrade()
+  {
+    DBUG_ASSERT(writer.is_locked());
+    DBUG_ASSERT(readers.load(std::memory_order_relaxed) == WRITER);
+    readers.store(1, std::memory_order_release);
+    /* Note: Any pending rd_lock() will not be woken up until u_unlock() */
+  }
+
+  void rd_unlock()
+  {
+    uint32_t lk= readers.fetch_sub(1, std::memory_order_release);
+    ut_ad(~WRITER & lk);
+    if (lk == WRITER + 1)
+      wake();
+  }
+  void u_unlock()
+  {
+    IF_DBUG_ASSERT(uint32_t lk=,)
+    readers.fetch_sub(1, std::memory_order_release);
+    DBUG_ASSERT(lk);
+    DBUG_ASSERT(lk < WRITER);
+    writer.wr_unlock();
+  }
+  void wr_unlock()
+  {
+    DBUG_ASSERT(readers.load(std::memory_order_relaxed) == WRITER);
+    readers.store(0, std::memory_order_release);
+    writer.wr_unlock();
+  }
+#endif
 };
 
-#if defined SRW_LOCK_DUMMY || defined _WIN32
+#ifdef _WIN32
 /** Slim read-write lock */
 class srw_lock_low
 {
 # ifdef UNIV_PFS_RWLOCK
   friend class srw_lock;
 # endif
-# ifdef _WIN32
   SRWLOCK lock;
 public:
   void init() {}
@@ -120,7 +272,14 @@ public:
   void wr_lock() { AcquireSRWLockExclusive(&lock); }
   bool wr_lock_try() { return TryAcquireSRWLockExclusive(&lock); }
   void wr_unlock() { ReleaseSRWLockExclusive(&lock); }
-# else
+};
+#elif defined SUX_LOCK_GENERIC
+/** Slim read-write lock */
+class srw_lock_low
+{
+# ifdef UNIV_PFS_RWLOCK
+  friend class srw_lock;
+# endif
   rw_lock_t lock;
 public:
   void init() { my_rwlock_init(&lock, nullptr); }
@@ -131,7 +290,6 @@ public:
   void wr_lock() { rw_wrlock(&lock); }
   bool wr_lock_try() { return !rw_trywrlock(&lock); }
   void wr_unlock() { rw_unlock(&lock); }
-# endif
 };
 #else
 typedef ssux_lock_low srw_lock_low;
