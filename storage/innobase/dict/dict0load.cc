@@ -1909,9 +1909,10 @@ err_len:
 
 	field = rec_get_nth_field_old(
 		rec, DICT_FLD__SYS_INDEXES__NAME, &name_len);
-	if (name_len == UNIV_SQL_NULL) {
+	if (name_len == 0 || name_len == UNIV_SQL_NULL) {
 		goto err_len;
 	}
+	ut_ad(field == &rec[8 + 8 + DATA_TRX_ID_LEN + DATA_ROLL_PTR_LEN]);
 
 	name_buf = mem_heap_strdupl(heap, (const char*) field,
 				    name_len);
@@ -2066,8 +2067,7 @@ dict_load_indexes(
 				ib::warn() << "Failed to load the"
 					" clustered index for table "
 					<< table->name
-					<< " because of the following error: "
-					<< err_msg << "."
+					<< " because of TABLE_ID mismatch."
 					" Refusing to load the rest of the"
 					" indexes (if any) and the whole table"
 					" altogether.";
@@ -2080,8 +2080,9 @@ dict_load_indexes(
 
 		ulint len;
 
-		if (!err_msg) {
-load_index_trx_id:
+		if ((!err_msg || err_msg == dict_load_index_del)
+		    && rec[8 + 8 + DATA_TRX_ID_LEN + DATA_ROLL_PTR_LEN]
+		    != static_cast<byte>(*TEMP_INDEX_PREFIX_STR)) {
 			trx_id_t id = mach_read_from_6(
 				rec_get_nth_field_old(
 					rec, DICT_FLD__SYS_INDEXES__DB_TRX_ID,
@@ -2094,21 +2095,9 @@ load_index_trx_id:
 				/* Skip delete-marked records. */
 				goto next_rec;
 			}
+		} else if (err_msg == dict_load_index_del) {
+			goto next_rec;
 		} else {
-			if (err_msg == dict_load_index_del) {
-				const char* n = reinterpret_cast<const char*>
-					(rec_get_nth_field_old(
-						rec,
-						DICT_FLD__SYS_INDEXES__NAME,
-						&len));
-				if (len && len != UNIV_SQL_NULL
-				    && *n != *TEMP_INDEX_PREFIX_STR) {
-					goto load_index_trx_id;
-				}
-
-				goto next_rec;
-			}
-
 			ib::error() << err_msg;
 			if (ignore_err & DICT_ERR_IGNORE_CORRUPT) {
 				goto next_rec;
