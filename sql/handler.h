@@ -2611,6 +2611,14 @@ public:
   /** true for online operation (LOCK=NONE) */
   bool online;
 
+  /*
+    When ha_commit_inplace_alter_table() is called the the engine can
+    set this to 1 to request a
+    handlerton->inplace_alter_table_committed() call after the ddl log
+    is committed.
+  */
+  bool inplace_alter_table_committed;
+
   /** which ALGORITHM and LOCK are supported by the storage engine */
   enum_alter_inplace_result inplace_supported;
 

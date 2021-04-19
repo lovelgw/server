@@ -7374,8 +7374,6 @@ static bool mysql_inplace_alter_table(THD *thd,
                                                   ha_alter_info,
                                                   true))
       goto rollback;
-    if (table->s->table_type != TABLE_TYPE_SEQUENCE)
-      alter_ctx->inplace_alter_table_committed= 1;
   }
 
   /*
@@ -9239,6 +9237,7 @@ bool mysql_alter_table(THD *thd, const LEX_CSTRING *new_db,
   */
   bool varchar= create_info->varchar, table_creation_was_logged= 0;
   bool binlog_as_create_select= 0, log_if_exists= 0;
+  bool inplace_alter_table_committed= 0;
   uint tables_opened;
   handlerton *new_db_type, *old_db_type;
   ha_rows copied=0, deleted=0;
@@ -10122,7 +10121,7 @@ do_continue:;
                                          &trigger_param,
                                          &alter_ctx);
       thd->count_cuted_fields= org_count_cuted_fields;
-
+      inplace_alter_table_committed= ha_alter_info.inplace_alter_table_committed;
       if (res)
       {
         cleanup_table_after_inplace_alter(&altered_table);
@@ -10582,7 +10581,7 @@ end_inplace:
   */
   ddl_log_complete(&ddl_log_state);
   /* Signal to storage engine that ddl log is commited */
-  if (alter_ctx.inplace_alter_table_committed &&
+  if (inplace_alter_table_committed &&
       old_db_type->inplace_alter_table_committed)
     (*old_db_type->inplace_alter_table_committed)(old_db_type);
 
@@ -10662,7 +10661,7 @@ err_cleanup:
   my_free(const_cast<uchar*>(frm.str));
   ddl_log_complete(&ddl_log_state);
   /* Signal to storage engine that ddl log is commited */
-  if (alter_ctx.inplace_alter_table_committed &&
+  if (inplace_alter_table_committed &&
       old_db_type->inplace_alter_table_committed)
     (*old_db_type->inplace_alter_table_committed)(old_db_type);
 
