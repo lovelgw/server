@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2013, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2020, MariaDB
+   Copyright (c) 2009, 2021, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -5787,15 +5787,17 @@ bool Item_func_like::fix_fields(THD *thd, Item **ref)
       String* res2= args[1]->val_str(&cmp_value2);
       if (!res2)
         return FALSE;				// Null argument
-      
       const size_t len   = res2->length();
+      if (!len)
+        return FALSE;
+
       const char*  first = res2->ptr();
       const char*  last  = first + len - 1;
       /*
         len must be > 2 ('%pattern%')
         heuristic: only do TurboBM for pattern_len > 2
       */
-      
+
       if (len > MIN_TURBOBM_PATTERN_LEN + 2 &&
           *first == wild_many &&
           *last  == wild_many)

@@ -4998,7 +4998,8 @@ public:
   void move_field_offset(my_ptrdiff_t ptr_diff) override
   {
     Field::move_field_offset(ptr_diff);
-    bit_ptr= ADD_TO_PTR(bit_ptr, ptr_diff, uchar*);
+    if (bit_ptr)
+      bit_ptr= ADD_TO_PTR(bit_ptr, ptr_diff, uchar*);
   }
   void hash(ulong *nr, ulong *nr2) override;
 
