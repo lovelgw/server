@@ -1,5 +1,5 @@
 /* Copyright (c) 2005, 2019, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2020, MariaDB
+   Copyright (c) 2009, 2021, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -465,11 +465,12 @@ public:
   Native *native_cache;
   Item_nodeset_context_cache(THD *thd, Native *native_arg, String *pxml):
     Item_nodeset_func(thd, pxml), native_cache(native_arg) { }
-  bool val_native(THD *thd, Native *nodeset)
+  bool val_native(THD *, Native *nodeset) override
   {
     return nodeset->copy(*native_cache);
   }
-  bool fix_length_and_dec() { max_length= MAX_BLOB_WIDTH;; return FALSE;  }
+  bool fix_length_and_dec() override
+  { max_length= MAX_BLOB_WIDTH; return FALSE; }
   Item *get_copy(THD *thd) override
   { return get_item_copy<Item_nodeset_context_cache>(thd, this); }
 };
