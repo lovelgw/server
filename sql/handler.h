@@ -1578,14 +1578,6 @@ struct handlerton
 
   /* Called for all storage handlers after ddl recovery is done */
   void (*signal_ddl_recovery_done)(handlerton *hton);
-  /**
-     Inform the storage engine that the DDL log for
-     handler::commit_inplace_alter_table() has been closed.
-     After this point, previously returned handler::table_version()
-     may be invalidated by the storage engine, or by subsequent
-     DDL. MDL will be released after this call.
-  */
-  void (*inplace_alter_table_committed)(handlerton *hton);
 
    /*
      Optional clauses in the CREATE/ALTER TABLE
@@ -2523,27 +2515,27 @@ public:
   uint key_count;
 
   /** Size of index_drop_buffer array. */
-  uint index_drop_count;
+  uint index_drop_count= 0;
 
   /**
      Array of pointers to KEYs to be dropped belonging to the TABLE instance
      for the old version of the table.
   */
-  KEY  **index_drop_buffer;
+  KEY  **index_drop_buffer= nullptr;
 
   /** Size of index_add_buffer array. */
-  uint index_add_count;
+  uint index_add_count= 0;
 
   /**
      Array of indexes into key_info_buffer for KEYs to be added,
      sorted in increasing order.
   */
-  uint *index_add_buffer;
+  uint *index_add_buffer= nullptr;
 
-  KEY_PAIR  *index_altered_ignorability_buffer;
+  KEY_PAIR  *index_altered_ignorability_buffer= nullptr;
 
   /** Size of index_altered_ignorability_buffer array. */
-  uint index_altered_ignorability_count;
+  uint index_altered_ignorability_count= 0;
 
   /**
      Old and new index names. Used for index rename.
@@ -2574,7 +2566,7 @@ public:
 
      @see inplace_alter_handler_ctx for information about object lifecycle.
   */
-  inplace_alter_handler_ctx *handler_ctx;
+  inplace_alter_handler_ctx *handler_ctx= nullptr;
 
   /**
     If the table uses several handlers, like ha_partition uses one handler
@@ -2586,13 +2578,13 @@ public:
 
     @see inplace_alter_handler_ctx for information about object lifecycle.
   */
-  inplace_alter_handler_ctx **group_commit_ctx;
+  inplace_alter_handler_ctx **group_commit_ctx= nullptr;
 
   /**
      Flags describing in detail which operations the storage engine is to
      execute. Flags are defined in sql_alter.h
   */
-  alter_table_operations handler_flags;
+  alter_table_operations handler_flags= 0;
 
   /* Alter operations involving parititons are strored here */
   ulong partition_flags;
@@ -2603,13 +2595,20 @@ public:
      with partitions to be dropped or changed marked as such + all partitions
      to be added in the new version of table marked as such.
   */
-  partition_info *modified_part_info;
+  partition_info * const modified_part_info;
 
   /** true for ALTER IGNORE TABLE ... */
   const bool ignore;
 
   /** true for online operation (LOCK=NONE) */
-  bool online;
+  bool online= false;
+
+  /**
+    When ha_commit_inplace_alter_table() is called the the engine can
+    set this to a function to be called after the ddl log
+    is committed.
+  */
+  void (*inplace_alter_table_committed)()= nullptr;
 
   /** which ALGORITHM and LOCK are supported by the storage engine */
   enum_alter_inplace_result inplace_supported;
@@ -2626,10 +2625,10 @@ public:
      Please set to a properly localized string, for example using
      my_get_err_msg(), so that the error message as a whole is localized.
   */
-  const char *unsupported_reason;
+  const char *unsupported_reason= nullptr;
 
   /** true when InnoDB should abort the alter when table is not empty */
-  bool error_if_not_empty;
+  const bool error_if_not_empty;
 
   Alter_inplace_info(HA_CREATE_INFO *create_info_arg,
                      Alter_info *alter_info_arg,

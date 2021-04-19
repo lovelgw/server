@@ -7333,9 +7333,8 @@ static bool mysql_inplace_alter_table(THD *thd,
 
   DBUG_EXECUTE_IF("alter_table_rollback_new_index", {
       if (!table->file->ha_commit_inplace_alter_table(altered_table,
-                                                     ha_alter_info,
+                                                      ha_alter_info,
                                                       false))
-        alter_ctx->inplace_alter_table_committed= 1;
       my_error(ER_UNKNOWN_ERROR, MYF(0));
       goto cleanup;
     });
@@ -7375,7 +7374,6 @@ static bool mysql_inplace_alter_table(THD *thd,
                                                   ha_alter_info,
                                                   true))
       goto rollback;
-    alter_ctx->inplace_alter_table_committed= 1;
   }
 
   /*
@@ -9239,6 +9237,8 @@ bool mysql_alter_table(THD *thd, const LEX_CSTRING *new_db,
   */
   bool varchar= create_info->varchar, table_creation_was_logged= 0;
   bool binlog_as_create_select= 0, log_if_exists= 0;
+  typeof(Alter_inplace_info::inplace_alter_table_committed)
+    inplace_alter_table_committed= nullptr;
   uint tables_opened;
   handlerton *new_db_type, *old_db_type= nullptr;
   ha_rows copied=0, deleted=0;
@@ -10122,7 +10122,8 @@ do_continue:;
                                          &trigger_param,
                                          &alter_ctx);
       thd->count_cuted_fields= org_count_cuted_fields;
-
+      inplace_alter_table_committed=
+        ha_alter_info.inplace_alter_table_committed;
       if (res)
       {
         cleanup_table_after_inplace_alter(&altered_table);
@@ -10597,6 +10598,11 @@ end_inplace:
 
   table_list->table= NULL;			// For query cache
   query_cache_invalidate3(thd, table_list, false);
+  ddl_log_complete(&ddl_log_state);
+
+  /* Signal to storage engine that ddl log is commited */
+  if (inplace_alter_table_committed)
+    (*inplace_alter_table_committed)();
 
   if (thd->locked_tables_mode == LTM_LOCK_TABLES ||
       thd->locked_tables_mode == LTM_PRELOCKED_UNDER_LOCK_TABLES)
@@ -10609,7 +10615,6 @@ end_inplace:
 
 end_temporary:
   my_free(const_cast<uchar*>(frm.str));
-  ddl_log_complete(&ddl_log_state);
 
   thd->variables.option_bits&= ~OPTION_BIN_COMMIT_OFF;
 
@@ -10653,11 +10658,8 @@ err_cleanup:
   my_free(const_cast<uchar*>(frm.str));
   ddl_log_complete(&ddl_log_state);
   /* Signal to storage engine that ddl log is commited */
-  if (alter_ctx.inplace_alter_table_committed && old_db_type &&
-      old_db_type->inplace_alter_table_committed)
-  {
-    (*old_db_type->inplace_alter_table_committed)(old_db_type);
-  }
+  if (inplace_alter_table_committed)
+    (*inplace_alter_table_committed)();
   DBUG_RETURN(true);
 
 err_with_mdl_after_alter:

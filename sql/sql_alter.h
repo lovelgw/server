@@ -331,7 +331,6 @@ public:
   char         storage_engine_buff[NAME_LEN], tmp_storage_engine_buff[NAME_LEN];
   bool         storage_engine_partitioned;
   bool         tmp_storage_engine_name_partitioned;
-  bool         inplace_alter_table_committed;
 
   /**
     Indicates that if a row is deleted during copying of data from old version

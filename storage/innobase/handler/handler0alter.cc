@@ -46,6 +46,7 @@ Smart ALTER TABLE
 #include "row0row.h"
 #include "row0upd.h"
 #include "trx0trx.h"
+#include "trx0purge.h"
 #include "handler0alter.h"
 #include "srv0mon.h"
 #include "srv0srv.h"
@@ -1891,7 +1892,7 @@ innobase_fts_check_doc_id_col(
 			col = dict_table_get_nth_col(table, i);
 
 			/* Because the FTS_DOC_ID does not exist in
-			the MySQL data dictionary, this must be the
+			the .frm file or TABLE_SHARE, this must be the
 			internally created FTS_DOC_ID column. */
 			ut_ad(col->mtype == DATA_INT);
 			ut_ad(col->len == 8);
@@ -11144,8 +11145,6 @@ ha_innobase::commit_inplace_alter_table(
 				= static_cast<ha_innobase_inplace_ctx*>(*pctx);
 			ctx->rollback_instant();
 		}
-	} else if (!new_clustered) {
-		trx_commit_for_mysql(trx);
 	} else {
 		/* Test what happens on crash if the redo logs
 		are flushed to disk here. The log records
@@ -11157,28 +11156,17 @@ ha_innobase::commit_inplace_alter_table(
 				DBUG_SUICIDE(););
 		ut_ad(!trx->fts_trx);
 
-		if (fail) {
-			trx_rollback_for_mysql(trx);
-		} else {
-			ut_ad(trx_state_eq(trx, TRX_STATE_ACTIVE));
-			ut_ad(trx->has_logged());
-			trx->commit();
-		}
+		ut_ad(trx_state_eq(trx, TRX_STATE_ACTIVE));
+		ut_ad(!new_clustered || trx->has_logged());
 
-		/* If server crashes here, the dictionary in
-		InnoDB and MySQL will differ.  The .ibd files
-		and the .frm files must be swapped manually by
-		the administrator. No loss of data. */
+		ha_alter_info->inplace_alter_table_committed =
+			purge_sys.resume_SYS;
+		purge_sys.stop_SYS();
+		trx->commit();
+		log_write_up_to(trx->commit_lsn, true);
 		DBUG_EXECUTE_IF("innodb_alter_commit_crash_after_commit",
-				log_buffer_flush_to_disk();
 				DBUG_SUICIDE(););
 	}
-
-	/* Flush the log to reduce probability that the .frm files and
-	the InnoDB data dictionary get out-of-sync if the user runs
-	with innodb_flush_log_at_trx_commit = 0 */
-
-	log_buffer_flush_to_disk();
 
 	/* At this point, the changes to the persistent storage have
 	been committed or rolled back. What remains to be done is to
